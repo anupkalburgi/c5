@@ -13,6 +13,7 @@ const HOOKS: &str = include_str!("../../../integrations/claude/c5/hooks/hooks.js
 const HOOK_SH: &str = include_str!("../../../integrations/claude/c5/hooks/c5-hook.sh");
 const README: &str = include_str!("../../../integrations/claude/c5/README.md");
 const SKILL: &str = include_str!("../../../integrations/claude/c5/skills/c5/SKILL.md");
+const INIT_CMD: &str = include_str!("../../../integrations/claude/c5/commands/init.md");
 const AGENTS_MD: &str = include_str!("../../../integrations/agents-md/c5.md");
 
 const BEGIN: &str = "<!-- c5:begin -->";
@@ -71,6 +72,7 @@ pub fn run(env: &c5_core::Env, cmd: InstallCmd) -> Result<()> {
             write(&p.join("hooks/hooks.json"), HOOKS)?;
             write(&p.join("hooks/c5-hook.sh"), HOOK_SH)?;
             write(&p.join("skills/c5/SKILL.md"), SKILL)?;
+            write(&p.join("commands/init.md"), INIT_CMD)?;
             write(&p.join("README.md"), README)?;
             let shown = display_path(&dir);
             println!("Wrote the c5 Claude Code plugin to {shown}\n");
@@ -79,6 +81,7 @@ pub fn run(env: &c5_core::Env, cmd: InstallCmd) -> Result<()> {
             println!("  claude plugin install c5@c5\n");
             println!("or inside Claude Code: /plugin marketplace add {shown}, then /plugin install c5@c5");
             println!("Re-run `c5 install claude` after upgrading c5, then `claude plugin marketplace update c5`.");
+            println!("Then run /c5:init in a project folder to set it up.");
         }
         InstallCmd::AgentsMd { file, print } => {
             if print {

@@ -10,6 +10,9 @@ connects Claude Code to it:
   reminder when something new needs attention (a question the user asked the agents, due, overdue, ripe, waiting
   on the user), once per item per day.
 - **SessionEnd hook**: closes that session.
+- **`/c5:init` command**: sets up the current folder. It proposes a project name and key (or an existing project
+  to link), runs `c5 project init` once you agree, then drafts the project's About from the repository for you to
+  review. `/c5:init "Billing Service" BIL` skips the question.
 - **c5 skill**: tells Claude when to record work with the `c5` CLI: focus, progress, bugs, revisits,
   decisions and handoffs.
 

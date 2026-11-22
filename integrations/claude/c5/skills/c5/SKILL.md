@@ -25,7 +25,8 @@ interface you use.
   them unless the user does or you have new information; if you do, say which decision you are questioning.
 - If the brief says the folder is **not linked to a c5 project**, say so to the user in your **first reply**,
   before other work: offer the suggested `c5 project init --name "…" --key …` from the brief (they may pick another
-  name or key), or `c5 project link KEY` for a similar existing project it lists. Run it once they agree. Do not
+  name or key), or `c5 project link KEY` for a similar existing project it lists (they can also run `/c5:init`,
+  which does the same and drafts the About). Run it once they agree. Do not
   create or link a project without asking, and do not stay silent about it.
 
 ## Project context: About and resources

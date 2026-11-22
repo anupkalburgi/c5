@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Renamed to c5** (from t9): the binary, `~/.c5`, `.c5`, the `C5_*` environment variables and the plugin.
+- **`/c5:init` in the Claude Code plugin.** Sets up the current folder: proposes a project name and key (or an
+  existing project to link), creates it once you agree, and drafts the project's About from the repository for
+  you to review. `/c5:init "Billing Service" BIL` skips the question. Re-run `c5 install claude` to get it.
+
 ## 0.2.0
 
 - **Ask the agents.** Every item's story has an "Ask the agents" box (and `c5 ask ID "…"` in a terminal). The
