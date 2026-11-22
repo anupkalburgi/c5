@@ -65,7 +65,7 @@ does its work and exits. A daemon (`c5 serve`) is planned for the UIs, not for c
 | `print.rs` | Human-readable output. `--json` prints the same structs serialized. |
 | `hook.rs` | `c5 hook claude session-start|prompt|session-end`: reads the hook payload from stdin, never fails the session. |
 | `install.rs` | `c5 install claude|agents-md`: writes integrations embedded in the binary (`include_str!`). |
-| `integrations/` | Sources of the Claude Code plugin (local marketplace) and the AGENTS.md section. |
+| `integrations/` | Sources of the Claude Code plugin (local marketplace: hooks, the c5 skill, the `/c5:init` command) and the AGENTS.md section. |
 
 ## 3. Storage
 

@@ -27,6 +27,9 @@ c5 project link BIL                                   # existing project
 c5 project init --name "Billing Service" --key BIL    # new project
 ```
 
+In Claude Code the user can also run `/c5:init`, which walks through the same steps and then drafts the About.
+When they do, follow its instructions.
+
 If the brief says **About (not written yet)**, draft it from the README and manifests, show the user, and record
 it once they agree (`c5 about set what "…"`, `c5 about add "…" --section stack`). See
 [context-and-history.md](context-and-history.md).

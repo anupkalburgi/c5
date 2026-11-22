@@ -93,6 +93,6 @@ Values:
 | `c5 vault path` | Print the vault path |
 | `c5 vault git ARGS…` | Run git in the vault, e.g. `c5 vault git log --oneline -10` |
 | `c5 doctor` | Rebuild, then report unparseable files, missing parents or link targets, stale active items, sessions that never ended, unfiled entries |
-| `c5 install claude [--dir DIR]` | Write the Claude Code plugin (default `~/.c5/integrations/claude`) and print the commands that add it |
+| `c5 install claude [--dir DIR]` | Write the Claude Code plugin (default `~/.c5/integrations/claude`: hooks, the c5 skill and the `/c5:init` command) and print the commands that add it |
 | `c5 install agents-md [--file F] [--print]` | Add or update the c5 section of `~/.codex/AGENTS.md` (or `F`) |
 | `c5 hook claude session-start\|prompt\|session-end` | Used by the Claude Code plugin. Reads the hook payload from stdin and always exits 0. `prompt` prints earlier decisions matching the user's message, or nothing. |

@@ -26,22 +26,33 @@ curl -fsSL https://raw.githubusercontent.com/anupkalburgi/c5/main/install.sh | s
 This downloads the binary for your machine (macOS or Linux, arm64 or x86_64) from the
 [latest release](https://github.com/anupkalburgi/c5/releases/latest), verifies its checksum, installs it to
 `~/.local/bin`, and adds that folder to your `PATH` in your shell's startup file if it isn't there yet. Open a new
-terminal afterwards. Options: `C5_INSTALL_DIR` to install elsewhere, `C5_VERSION=v0.1.1` to pin a version,
+terminal afterwards. Options: `C5_INSTALL_DIR` to install elsewhere, `C5_VERSION=v0.2.0` to pin a version,
 `C5_NO_MODIFY_PATH=1` to leave your shell files alone. To build from
 source instead: `cargo install --git https://github.com/anupkalburgi/c5 c5` (Rust 1.89+).
 
 Connect your agents:
 
 ```sh
-c5 install claude      # Claude Code plugin; prints the two `claude plugin …` commands to run
-c5 install agents-md   # adds the c5 section to ~/.codex/AGENTS.md (or --file PATH)
+c5 install claude                                  # writes the Claude Code plugin, then add it:
+claude plugin marketplace add ~/.c5/integrations/claude
+claude plugin install c5@c5
+c5 install agents-md                               # adds the c5 section to ~/.codex/AGENTS.md (or --file PATH)
 ```
 
 ## Use
 
+Set up each project once. In Claude Code, run `/c5:init` in the project folder: it proposes a name and key (or
+an existing project to link), creates the project once you agree, and drafts its About from the repository for
+you to review. From a terminal:
+
 ```sh
 cd ~/code/my-project
 c5 project init --name "My Project" --key MP   # once; worktrees and clones are found by git remote
+```
+
+Then look at what's recorded:
+
+```sh
 c5 web                                         # in your browser: overview, map, full plan, every item's story
 c5 tui                                         # the same in the terminal
 ```

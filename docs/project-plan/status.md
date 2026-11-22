@@ -17,7 +17,7 @@ CI tests both systems.
 | Brief | `c5 context`: a token-budgeted summary for agents at session start |
 | TUI | `c5 tui`: an overview for humans (waiting on you, latest change, handoff, in progress, plans, issues, decisions), plan tree, decision log, journal, triage, search; records decisions, items, notes and status; live refresh |
 | Web UI | `c5 web`: overview, a map with the project at the centre and signals of going in circles (`c5 insights`), the full plan tree, item pages with where each item came from and what happened since, answering questions (recorded as decisions), decisions, experiments, resources, timeline, search, referenced files; local only with a per-run token |
-| Integrations | Claude Code plugin (SessionStart, UserPromptSubmit and SessionEnd hooks, plus a skill); an `AGENTS.md` section for Codex and others |
+| Integrations | Claude Code plugin (SessionStart, UserPromptSubmit and SessionEnd hooks, a skill, and the `/c5:init` command); an `AGENTS.md` section for Codex and others |
 | Quality | 53 tests: unit, TUI rendering and key handling, and end-to-end CLI tests covering resolution, inbox adoption, hand edits, lossless reindex, concurrent writers, the Claude hooks, background commits, the decision log, project context and insights, plus an HTTP test of the web server |
 
 Performance on a 2,000-item, 50,000-entry project: `c5 log` takes about 3 ms in-process, `c5 context` 17 ms, and

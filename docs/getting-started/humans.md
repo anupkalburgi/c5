@@ -68,8 +68,14 @@ cd ~/code/billing-service
 c5 context
 ```
 
-In a directory that isn't linked yet, `c5 context` says so and lists existing projects that look similar. To
-create a project:
+In a directory that isn't linked yet, `c5 context` says so and lists existing projects that look similar.
+
+If you use Claude Code, the quickest way is `/c5:init` (once the plugin from [step 5](#5-connect-your-agents) is
+installed). It proposes a name and key from the README or manifest, offers to link a similar existing project
+instead, and creates the project once you agree. Then it drafts the project's About from the repository and
+records it after you review it. To skip the question, pass the name and key: `/c5:init "Billing Service" BIL`.
+
+To create a project from a terminal:
 
 ```sh
 c5 project init --name "Billing Service" --key BIL
@@ -112,8 +118,16 @@ claude plugin marketplace add ~/.c5/integrations/claude
 claude plugin install c5@c5
 ```
 
-Start a new Claude Code session in the project and the brief appears at the top. Re-run `c5 install claude`
-after upgrading c5.
+Start a new Claude Code session in the project and the brief appears at the top. If the folder isn't linked to a
+project yet, run `/c5:init` (see [step 3](#3-link-your-first-project)). Re-run `c5 install claude` after upgrading
+c5, then `claude plugin marketplace update c5`.
+
+The plugin gives Claude Code:
+
+- the brief at session start, on resume, after `/clear` and after compaction
+- earlier decisions recalled when your message touches their topic, and reminders when something needs attention
+- `/c5:init`, which sets up the current folder
+- a skill that tells Claude when to record plans, bugs, decisions, experiments and handoffs
 
 **Codex and other agents** that read an `AGENTS.md` file:
 
@@ -181,7 +195,8 @@ to know:
 | Symptom | Fix |
 |---|---|
 | Changes are not being committed | `c5 doctor` reports the last failed commit; details are in `~/.c5/.state/git.log`. `c5 vault commit` commits now and shows the error. |
-| "this directory is not linked to a project" | `c5 project link KEY` or `c5 project init` |
+| "this directory is not linked to a project" | `/c5:init` in Claude Code, or `c5 project link KEY` / `c5 project init` |
+| `/c5:init` is not found in Claude Code | Re-run `c5 install claude`, then `claude plugin marketplace update c5`, and start a new session. |
 | An agent's entries land in the inbox | The agent ran in an unlinked directory. Link it; the entries move over automatically. |
 | The brief didn't appear in Claude Code | `claude plugin list` should list c5. Check `c5` is on `PATH`, or set `C5_BIN`. |
 | Something looks stale | `c5 reindex` |
