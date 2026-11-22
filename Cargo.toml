@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/c5-core", "crates/c5", "crates/c5-tui", "crates/c5-web"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/anupkalburgi/c5"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3

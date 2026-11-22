@@ -1,0 +1,14 @@
+{
+  "name": "c5",
+  "description": "c5: shared project memory for coding agents",
+  "owner": {
+    "name": "c5"
+  },
+  "plugins": [
+    {
+      "name": "c5",
+      "description": "Project brief at session start and the c5 skill for recording plans, bugs, revisits, decisions and handoffs.",
+      "source": "./c5"
+    }
+  ]
+}

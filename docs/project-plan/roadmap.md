@@ -1,0 +1,46 @@
+# Roadmap
+
+Every milestone builds on the same core (`c5-core::Store`) and keeps the storage format.
+
+| Milestone | Theme | Status |
+|---|---|---|
+| M0 | Core and CLI | Done |
+| M1 | Agent integration: Claude Code plugin, `AGENTS.md` | Done |
+| M1+ | Decision log, git history, terminal UI, release binaries and installer | Done |
+| M1++ | Goal and outcome, freshness, reminders through the agent; lane-chart timeline; asking agents from the web ([plan](goal-outcome-freshness.md)) | 0.1.8, 0.1.9, 0.2.0 done |
+| M2 | Local server (`c5 serve`) and a live TUI | Planned |
+| M3 | MCP server, importing plans, decision mining, hygiene | Planned |
+| M4 | Web UI (done: `c5 web`) and semantic search | Web UI done; search planned |
+| M5 | Packaging and reach | Planned |
+
+## M2: local server
+
+- `c5 serve` on `127.0.0.1` and a Unix socket, with a bearer token in `~/.c5/.state/token`.
+- A REST API mirroring the CLI's JSON shapes: projects, context, items (`If-Match: rev`), entries, sessions,
+  decisions, search.
+- Server-sent events for item, entry and session changes.
+- A file watcher (FSEvents/inotify), so edits made in an editor appear at once.
+- Start at login (launchd).
+- The TUI switches its data layer to the server: instant updates instead of 2-second polling.
+- TUI additions: decision form with alternatives, areas and scope; an item field editor; a sessions view.
+
+## M3: MCP, import, hygiene
+
+- `c5 mcp`: a stdio MCP server exposing context, add, log, status, decide, reject, check, search and show.
+- `c5 import FILE`: turn an existing plan document (headings, checklists, "to revisit" lists) into items, with a
+  preview.
+- Decision mining: at session end, read the transcript and propose unrecorded decisions as `proposed` items for
+  the human to accept in the TUI.
+- `c5 move`, `c5 rm` (to a trash folder), `c5 doctor --fix`, interactive triage.
+
+## M4: semantic search and web UI
+
+- Optional local embeddings in `sqlite-vec` with hybrid BM25 + vector ranking, behind a cargo feature.
+- Better decision recall when different words are used for the same topic.
+- A web UI on the M2 API.
+
+## M5: packaging and reach
+
+- A Homebrew tap and signed macOS binaries (release binaries, a curl installer and Linux CI are done).
+- More harnesses (Codex hooks when available, Cursor, Gemini CLI, …).
+- Optional automatic push of the vault to a git remote, to sync between machines.

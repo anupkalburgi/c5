@@ -1,0 +1,98 @@
+# CLI reference
+
+`c5 <command> --help` shows the same information for each command.
+
+## Global options
+
+| Option | Env | Meaning |
+|---|---|---|
+| `--json` | | Print JSON instead of text |
+| `--cwd DIR` | | Act as if run from `DIR` |
+| `--agent NAME` | `C5_AGENT` | Who is writing. Default: `human` at a terminal, else `unknown`. |
+| `--session ID` | `C5_SESSION` | Session id or its last characters. Default: the open session for this directory. |
+| `-P, --project KEY` | `C5_PROJECT` | Project key or slug. Default: resolved from the directory. |
+
+Other environment variables: `C5_VAULT` (vault, default `~/.c5`), `C5_HOME` (state dir, default `~/.c5/.state`),
+`C5_GIT=0` (no automatic commit), `C5_GIT_DELAY_MS`, `C5_TRACE=1` (timings on stderr). Settings file:
+`~/.c5/config.toml` with `git` and `git_delay_ms`. Wherever a command takes text, `-` reads it from stdin.
+
+Values:
+
+- **Kinds:** `plan`, `phase`, `feature`, `task`, `bug`, `regression`, `revisit`, `decision`, `question`, `idea`,
+  `experiment`, `resource`, `note`.
+  Aliases: `milestone`, `feat`, `todo`, `reg`.
+- **Statuses:** `open`, `active`, `blocked`, `done`, `dropped`, `proposed`, `accepted`, `rejected`, `superseded`,
+  `failed`, `inconclusive`. `succeeded` is an alias of `done`.
+  Aliases: `wip`, `doing`, `in-progress`, `closed`, `fixed`, `wontfix`, `cancelled`.
+- **Entry kinds:** `progress`, `note`, `blocker`, `finding`, `handoff`, `decision`, `status-change`, `checkin`
+  (written by `c5 still`).
+- **Dates** (`--due`, `--retry-after`): `2026-12-01`, `today`, `tomorrow`, `mon`…`sun` (the next one, never
+  today), or a delay: `3d`, `2w`, `1m`; `none` clears.
+- **Links** are written `rel:ID`, where rel is one of `blocks`, `blocked-by`, `relates`, `regression-of`,
+  `supersedes`, `superseded-by`, `duplicate-of`, `applies-to`.
+
+## Reading
+
+| Command | Options |
+|---|---|
+| `c5 context` | `--budget N`: approximate token budget (default 1500) |
+| `c5 pending` | What needs attention: overdue, due soon, ripe, waiting on the user, stale, going in circles, closed without an outcome · `-A` all projects · `-n N` (alias: `outstanding`) |
+| `c5 whereami` | |
+| `c5 ls` | `-k KIND`… · `-s STATUS`… · `-a/--all` include closed · `-t/--tree` · `--parent ID` · `-A/--all-projects` · `-n N` |
+| `c5 show ID` | `-n N` journal entries (default 15) |
+| `c5 journal` | `-i ID` · `--of-session ID` · `-k KIND`… · `--days N` · `-n N` (default 30) · `-A` (alias: `timeline`) |
+| `c5 search WORDS…` | `-A` · `-n N` (default 20). Every word must match, as a prefix. |
+| `c5 triage` | `--days N` (default 14) |
+| `c5 about` | The project's About. `about add TEXT --section S`, `about set S TEXT` (`-` reads stdin), `about confirm`, `about edit`. Sections: what, goals, non-goals, architecture, stack, run, data, terms, constraints, links |
+| `c5 history TOPIC…` | Everything recorded about a topic, oldest first · `-A` all projects |
+| `c5 insights` | Signs of going in circles: flip-flopping decisions, reopened work, repeats of dead ends, spinning branches, stuck work (alias: `loops`) |
+| `c5 timeline` | Key events, newest first, by day · `--days N` (default 30) · `--topic T` · `-n N` |
+| `c5 resources` | Resources of this project · `--type T` · `-a` include dropped |
+| `c5 check WORDS…` | `-n N` (default 10). Decisions, rejections and ideas of any status matching any word, in this project and the global log |
+| `c5 decisions` | `--area A`… · `-a/--all` (include superseded) · `-g/--global` · `--md` (ADR-style document) |
+| `c5 web [ID]` | Browser UI (opens this folder's project, or one item) · `--port N` · `--no-open`; see [web.md](web.md) |
+| `c5 tui` | Terminal UI (opens on this directory's project); see [tui.md](tui.md) |
+| `c5 project ls` / `c5 project show [KEY]` | |
+| `c5 session ls` | `--open` · `-A` · `-n N` |
+| `c5 focus` | With no id: prints the current focus |
+
+## Writing
+
+| Command | Options |
+|---|---|
+| `c5 add KIND TITLE…` | `--parent ID` · `--goal WHY` · `--due WHEN` · `--after ID`… (waits on it) · `--area A`… · experiments: `--hypothesis H` `--retry-when C` `--retry-after DATE` · resources: `--type T` `--at LOCATION` `--owner O` · `-b/--body TEXT` · `-t/--tag T`… · `-p/--priority 0-9` · `-s/--status S` · `-l/--link rel:ID`… · `-f/--focus` |
+| `c5 log MESSAGE…` | `-k/--kind K` (default progress) · `-i/--item ID` (default: the focus) · `-r/--ref PATH`… |
+| `c5 focus ID` | `--goal WHY` (recorded if it has none) · `--no-activate` (don't move `open` to `active`) · `--clear` |
+| `c5 status ID STATUS` | `-n/--note TEXT` (when closing: the outcome) · `--due` `--goal` `--after` · `--retry-when C` · `--retry-after DATE` (a date, `30d`/`6w`/`3m`, or `none`) |
+| `c5 done ID` | `-n/--note TEXT` (alias `--outcome`): what came out of it. Without one, c5 suggests recording it; items that waited on this one are listed as ripe |
+| `c5 ask ID QUESTION…` | Ask the agents about an item; the next agent session in the project answers it |
+| `c5 answer ID ANSWER…` | Answer a question (agents: one the user asked); closes it and records the answer on the item it is about · `--decide` also records a decision |
+| `c5 still ID -n WHY` | Still relevant: a check-in that resets the idle clock without counting as progress |
+| `c5 update ID` | `--goal WHY` · `--due WHEN\|none` · `--after ID`… · `--area A`… · `--hypothesis` `--retry-when` `--retry-after` `--type` `--at` `--owner` · `--title` · `--status` · `--parent ID\|none` · `-p 0-9\|none` · `-t TAG`… · `--untag TAG`… · `-l rel:ID`… · `-b BODY` · `--rev N` (fail on conflict) · `-n NOTE` |
+| `c5 decide TITLE…` | `-w/--because WHY` · `-r/--rejected "option: why not"`… · `--area A`… · `--for ID`… (applies to that item and below) · `-s/--supersedes ID`… · `--proposed` · `-g/--global` · `-b/--body NOTES` · `--parent ID` |
+| `c5 reject TITLE…` | The same options as `decide` (except `-s`, `--proposed`); records a `rejected` decision |
+| `c5 handoff MESSAGE…` | |
+| `c5 attach ENTRY ID` | ENTRY is an entry id or its last 6 characters |
+| `c5 edit ID` | Opens `$VISUAL` / `$EDITOR` |
+
+## Projects and sessions
+
+| Command | Options |
+|---|---|
+| `c5 project init` | `-n/--name` (default: directory name) · `-k/--key` (default: derived from the name) · `-d/--description` · `--no-root` |
+| `c5 project link KEY` | Adds this directory and its git remote to the project |
+| `c5 session start` | `--harness-id ID` (resume the session with this id) · `--context` (also print the brief) · `--budget N` |
+| `c5 session end` | `--handoff TEXT` |
+
+## Maintenance and integrations
+
+| Command | Meaning |
+|---|---|
+| `c5 reindex` | Rebuild the index from the vault |
+| `c5 vault commit` | Commit vault changes now (c5 also does this automatically in the background after every write) |
+| `c5 vault path` | Print the vault path |
+| `c5 vault git ARGS…` | Run git in the vault, e.g. `c5 vault git log --oneline -10` |
+| `c5 doctor` | Rebuild, then report unparseable files, missing parents or link targets, stale active items, sessions that never ended, unfiled entries |
+| `c5 install claude [--dir DIR]` | Write the Claude Code plugin (default `~/.c5/integrations/claude`) and print the commands that add it |
+| `c5 install agents-md [--file F] [--print]` | Add or update the c5 section of `~/.codex/AGENTS.md` (or `F`) |
+| `c5 hook claude session-start\|prompt\|session-end` | Used by the Claude Code plugin. Reads the hook payload from stdin and always exits 0. `prompt` prints earlier decisions matching the user's message, or nothing. |

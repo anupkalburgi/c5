@@ -1,0 +1,133 @@
+# Changelog
+
+## 0.2.0
+
+- **Ask the agents.** Every item's story has an "Ask the agents" box (and `c5 ask ID "…"` in a terminal). The
+  question reaches the agent at the right moment: on your next message to a session running in the project
+  (once), or first in the next session's brief under "Asked by the user"; `c5 pending` lists it first. The agent
+  answers from evidence with the new `c5 answer ID "…"` (or says it cannot tell) and tells you; the answer is
+  recorded on the question and on the item, shown as Q and A on the item's story, on the Questions page ("You
+  asked the agents") and on the Overview.
+- `c5 answer` also works for ordinary questions (`--decide` records the answer as a decision), like the web
+  Answer box.
+
+## 0.1.9
+
+- **Timeline, redone as lanes.** One lane per feature (or plan, or group of loose items), most recently active
+  first, with a sessions row and an activity histogram. Marks show what happened (✓ done, ⇢ combined, ✗ dropped
+  or failed, ◆ decision, ★ finding, ⚑ blocker, ✉ handoff, ↺ reopened, ● new, ? question); bursts collapse into
+  one pill and quiet hours are squeezed into a marked break. Open a lane to see each item as a bar from created to
+  closed, coloured by outcome, with due dates and idle work hatched. Everything opens in the same side panel as
+  the Map.
+- **Story mode:** each day in a sentence (what closed and how, what opened, what was decided, blockers,
+  findings, where the work went), then its key events, with runs folded.
+
+## 0.1.8
+
+- **Goal and outcome on every item.** `--goal "why"` on `add`, `update` and `focus` (recorded if the item has
+  none). Items without one show their nearest ancestor's goal, or their parent's title, labelled as inferred. The
+  outcome is the closing note (`c5 done ID -n "what came out of it"`), read as ✓ done, ⇢ combined into,
+  duplicate of or superseded, ✗ dropped, obsolete or failed, ~ inconclusive; the ids it names become "led to".
+- **Web: the story first.** The Map panel and every item page start with Goal, Outcome (or the latest progress),
+  Led to, how the children turned out, and why it needs attention. Closing from the web asks what came out of it
+  (it used to record no reason). Set a due date, say "still relevant", or state the goal from there.
+- **Due dates and waiting:** `--due fri|2026-12-01|3d` (set only when the user gives a date) and `--after ID`
+  (a `blocked-by` link: the item is *ripe* once ID closes).
+- **`c5 pending`** (alias `outstanding`, `--json` for agents): one ranked list of what needs attention: overdue,
+  due soon, ripe, going in circles, waiting on the user, stale, closed without an outcome; old backlog is only
+  counted. **`c5 still ID -n "…"`**: still relevant (a check-in that resets the idle clock, not progress).
+- **Reminders through the agent.** The brief's "Needs attention" now comes right after the focus (it was last,
+  so the budget cut it first) and tells the agent to mention what concerns the user. On each message the hook
+  adds a short "c5 reminder" when something new needs attention, once per item per day. `c5 done` says which
+  items are ripe now and suggests recording an outcome when there is none.
+- Web and TUI: "Needs attention" card and badges; outcome marks (✓ ⇢ ✗) and attention markers on the map.
+- The brief's "Watch out" and "Worth retrying" sections are now part of "Needs attention".
+- Index schema 5 (rebuilt automatically): the goal is searchable.
+
+## 0.1.7
+
+- **Map:** explore without leaving it. Clicking a node opens it in a panel beside the map (description, what is
+  inside it with progress, what applies from history, latest entries) and highlights its path back to the
+  project and everything under it. You can change its status, add a note or answer a question there. Ids in the
+  panel select on the map and open their group. Double-click for the full page; "show on the map" on every item
+  page brings you back to the same spot. Drag to move, ⌘-scroll to zoom, Esc to deselect; the map keeps its
+  position and selection when you come back.
+
+## 0.1.6
+
+- **Map:** a new web page with the project at the centre and its plans, features and work branching out. Leaves
+  are grouped by outcome (in progress, open issues, questions, experiments, decisions, ideas, dead ends, done);
+  click a group to open it, a node for its page. Dead ends are drawn with dashed red edges; ↻ marks a spinning
+  branch. Zoom, fit, expand all and collapse all.
+- **Are we going in circles?** `c5 insights` (alias `loops`) and the Map and Overview pages flag decisions that
+  changed two or more times, work that was closed and reopened, new work that resembles an earlier dead end
+  (failed experiment, rejected option, dropped item, superseded decision), branches with lots of activity but
+  nothing finished or issues opening faster than they close, and work active for days without finishing.
+- The agent brief has a "Watch out: signs of going in circles" section, so agents notice too.
+
+## 0.1.5
+
+- **Web UI:** `c5 web [ID]` opens a local browser UI: an overview, the full plan as a tree with progress and
+  filters, and a page for every item with its place in the plan, its whole history, where it came from (when, by
+  which agent and session, what was happening just before) and what happened since. Questions can be answered
+  there; the answer closes the question and is recorded as a decision. Also decisions, experiments, resources,
+  timeline, journal, About and search, and referenced files rendered in place. Refreshes as agents work.
+  Local only: 127.0.0.1, a per-run token in an HttpOnly cookie, Host checks, a strict CSP.
+- Agents are told to keep question titles short and put the options, trade-offs and a recommendation in the body.
+
+## 0.1.4
+
+- TUI: every row shows how recently it changed: ● bright green (15 min), ● green (1 hour), • yellow (today),
+  · grey (this week). The most recently touched item is tagged **NEW**. A legend sits at the top of the
+  Overview. Journal rows use a compact time and fit the pane.
+
+## 0.1.3
+
+- **Project context:** each project has an About (what it is, goals, architecture, stack, how to run it, key
+  terms, constraints, links) in `project.md`, shown at the top of every brief. `c5 about`, `about add`,
+  `about set`, `about edit`, `about confirm`. Agents draft it from the README for new projects.
+- **Resources:** `c5 add resource "…" --type dataset|table|model|endpoint|service|… --at LOCATION --owner O`
+  and `c5 resources`. c5 refuses text that looks like a credential.
+- **Experiments:** `c5 add experiment "…" --hypothesis "…"`; outcomes `done`, `failed`, `inconclusive` with
+  `--retry-when` and `--retry-after`; "Worth retrying" in the brief and the TUI.
+- **History and timeline:** `c5 history "topic"` (everything on a topic, oldest first) and `c5 timeline`
+  (what happened when); a Timeline tab in the TUI. Recall on focus and on each message now includes experiments
+  and resources.
+- The skill and the AGENTS.md section tell agents to consult history before planning.
+
+## 0.1.2
+
+- Folders where an agent works without a c5 project are no longer silent: the brief tells the agent to raise it
+  in its first reply with a ready-made `c5 project init --name … --key …`, the Claude Code message hook reminds
+  once per session, and the folder shows as "not set up" in `c5 tui` (press `i` to create the project there),
+  `c5 project ls` and `c5 doctor`.
+- Fix: entries written in the same millisecond could sort out of order (seen as the wrong LATEST change).
+  Ids now come from a monotonic ULID generator.
+- The installer adds `~/.local/bin` to your `PATH` (zsh, bash, fish, or `~/.profile`) when it isn't there
+  already; `C5_NO_MODIFY_PATH=1` skips this.
+
+## 0.1.1
+
+- Prebuilt binaries for macOS (Apple Silicon, Intel) and Linux (x86_64, ARM64), and a one-line installer:
+  `curl -fsSL https://raw.githubusercontent.com/anupkalburgi/c5/main/install.sh | sh`.
+- Fix: concurrent writers could fail with a duplicate-id error while indexing the same journal entry. Index
+  writes are now atomic (the index is rebuilt automatically on first run).
+- Fix: `c5 … | head` no longer reports a broken pipe.
+- CI now also runs on Linux.
+
+## 0.1.0
+
+First release.
+
+- **CLI** (`c5`): projects resolved from the directory (including git worktrees), items in a tree with typed
+  links, journal entries, sessions with focus, handoffs, triage, full-text search, `doctor`, `--json`
+  everywhere.
+- **Vault** in `~/.c5`: Markdown with YAML front matter as the source of truth, a rebuildable SQLite index, and
+  automatic git commits in the background.
+- **Brief** (`c5 context`): a token-budgeted summary for agents at session start.
+- **Decision log**: decisions with reasons and rejected alternatives, rejections, proposals, supersede chains,
+  scope and areas, a global log; recalled in the brief, on focus, with `c5 check`, and on every user message in
+  Claude Code.
+- **TUI** (`c5 tui`): an overview for humans, plan tree, decision log, journal, triage and search, with live
+  refresh.
+- **Integrations**: a Claude Code plugin (hooks and skill) and an `AGENTS.md` section for Codex and others.

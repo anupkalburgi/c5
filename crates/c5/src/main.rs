@@ -1,0 +1,1348 @@
+//! `c5`: the c5 command line. Every command is a thin call into `c5_core::Store`; `--json` prints the
+//! same data the REST API and MCP tools return.
+
+mod hook;
+mod install;
+mod print;
+
+use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use anyhow::{Context as _, Result, bail};
+use c5_core::decisions::DecisionInput;
+use c5_core::index::{EntryFilter, ItemFilter};
+use c5_core::*;
+use clap::{Args, Parser, Subcommand};
+use serde::Serialize;
+
+#[derive(Parser)]
+#[command(
+    name = "c5",
+    version,
+    about = "c5: shared, persistent project memory for coding agents and the humans running them"
+)]
+#[command(after_help = "Start here: `c5 context` prints the brief for the project in the current directory.")]
+struct Cli {
+    /// Print JSON instead of text.
+    #[arg(long, global = true)]
+    json: bool,
+    /// Act as if run from this directory.
+    #[arg(long, global = true, value_name = "DIR")]
+    cwd: Option<PathBuf>,
+    /// Who is writing: claude-code, codex, human, …
+    #[arg(long, global = true, env = "C5_AGENT")]
+    agent: Option<String>,
+    /// Session id (or its last characters). Default: the open session for this directory.
+    #[arg(long, global = true, env = "C5_SESSION")]
+    session: Option<String>,
+    /// Project key or slug. Default: resolved from the directory.
+    #[arg(long, short = 'P', global = true, env = "C5_PROJECT")]
+    project: Option<String>,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Print the project brief for this directory: handoff, focus, plan, open issues, decisions, recent activity.
+    Context {
+        /// Approximate token budget for the brief.
+        #[arg(long, default_value_t = 1500)]
+        budget: usize,
+    },
+    /// Show which project and session this directory resolves to.
+    Whereami,
+    /// Register, link and list projects.
+    #[command(subcommand)]
+    Project(ProjectCmd),
+    /// Start, end and list agent sessions.
+    #[command(subcommand)]
+    Session(SessionCmd),
+    /// Set the item you are working on; later `c5 log` entries attach to it.
+    Focus {
+        id: Option<String>,
+        /// Clear the focus.
+        #[arg(long, conflicts_with = "id")]
+        clear: bool,
+        /// Do not move an `open` item to `active`.
+        #[arg(long)]
+        no_activate: bool,
+        /// Why you are picking it up: recorded as its goal if it has none.
+        #[arg(long, visible_alias = "why")]
+        goal: Option<String>,
+    },
+    /// Add an item: plan, phase, feature, task, bug, regression, revisit, decision, question, note.
+    Add(AddArgs),
+    /// Append a journal entry (progress by default). Use `-` to read the message from stdin.
+    Log {
+        #[arg(required = true, num_args = 1..)]
+        message: Vec<String>,
+        #[arg(long, short, default_value = "progress")]
+        kind: EntryKind,
+        /// Item to file the entry under (default: the session focus).
+        #[arg(long, short)]
+        item: Option<String>,
+        /// Files, commits, run folders this entry refers to.
+        #[arg(long = "ref", short)]
+        refs: Vec<String>,
+    },
+    /// Change an item's status.
+    Status {
+        id: String,
+        status: Status,
+        #[arg(long, short)]
+        note: Option<String>,
+        #[command(flatten)]
+        extra: ExtraArgs,
+    },
+    /// Mark an item done. The note is its outcome: what came out of it (result, commits, what it led to).
+    Done {
+        id: String,
+        #[arg(long, short, visible_alias = "outcome")]
+        note: Option<String>,
+    },
+    /// What needs attention: overdue and due soon, ripe (what it waited on closed), waiting on the user, stale,
+    /// going in circles, closed without an outcome.
+    #[command(alias = "outstanding")]
+    Pending {
+        /// Every project.
+        #[arg(long, short = 'A')]
+        all_projects: bool,
+        #[arg(long, short = 'n', default_value_t = 50)]
+        limit: usize,
+    },
+    /// Ask the agents a question about an item; the next agent session in the project answers it.
+    Ask {
+        id: String,
+        #[arg(required = true, num_args = 1..)]
+        question: Vec<String>,
+    },
+    /// Answer a question (for agents: one the user asked you). Answer from evidence and say where it comes from;
+    /// if you cannot tell, say so. `-` reads stdin.
+    Answer {
+        id: String,
+        #[arg(required = true, num_args = 1..)]
+        answer: Vec<String>,
+        /// Also record the answer as a decision.
+        #[arg(long)]
+        decide: bool,
+    },
+    /// Still relevant: a check-in that resets the idle clock without counting as progress. Say why.
+    Still {
+        id: String,
+        /// Why it is still needed, or what it waits on.
+        #[arg(long, short, required = true)]
+        note: String,
+    },
+    /// Change an item's fields.
+    Update(UpdateArgs),
+    /// Record a decision: what was chosen, why, and what was rejected. Replaces earlier decisions with -s.
+    Decide {
+        #[arg(required = true, num_args = 1..)]
+        title: Vec<String>,
+        #[command(flatten)]
+        d: DecisionArgs,
+        /// Decisions this one replaces (they become `superseded`).
+        #[arg(long, short)]
+        supersedes: Vec<String>,
+        /// Record it as proposed, for the human to accept later.
+        #[arg(long)]
+        proposed: bool,
+    },
+    /// Record an option that was considered and rejected, so it is not proposed again.
+    Reject {
+        #[arg(required = true, num_args = 1..)]
+        title: Vec<String>,
+        #[command(flatten)]
+        d: DecisionArgs,
+    },
+    /// Has this been decided, rejected or parked before? Searches decisions and ideas (this project and global).
+    Check {
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        #[arg(long, short = 'n', default_value_t = 10)]
+        limit: usize,
+    },
+    /// The decision log: accepted, proposed and rejected decisions, newest first.
+    Decisions {
+        /// Only these areas.
+        #[arg(long)]
+        area: Vec<String>,
+        /// Include superseded decisions.
+        #[arg(long, short)]
+        all: bool,
+        /// The global log (decisions for every project).
+        #[arg(long, short)]
+        global: bool,
+        /// Print a Markdown document (ADR style) instead of a list.
+        #[arg(long)]
+        md: bool,
+    },
+    /// Write a handoff for the next session: where you stopped and what comes next. `-` reads stdin.
+    Handoff {
+        #[arg(required = true, num_args = 1..)]
+        message: Vec<String>,
+    },
+    /// List items (open ones by default).
+    Ls(LsArgs),
+    /// Show an item with its children, links and journal.
+    Show {
+        id: String,
+        /// Number of journal entries to show.
+        #[arg(long, short = 'n', default_value_t = 15)]
+        entries: usize,
+    },
+    /// Show journal entries, newest first.
+    Journal {
+        #[arg(long, short)]
+        item: Option<String>,
+        /// Only this session (id or suffix).
+        #[arg(long = "of-session")]
+        of_session: Option<String>,
+        #[arg(long, short)]
+        kind: Vec<EntryKind>,
+        /// Only the last N days.
+        #[arg(long)]
+        days: Option<i64>,
+        #[arg(long, short = 'n', default_value_t = 30)]
+        limit: usize,
+        #[arg(long, short = 'A')]
+        all_projects: bool,
+    },
+    /// Full-text search over items and journal entries.
+    Search {
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        #[arg(long, short = 'A')]
+        all_projects: bool,
+        #[arg(long, short = 'n', default_value_t = 20)]
+        limit: usize,
+    },
+    /// List entries that are not filed under an item, and inbox entries from unlinked directories.
+    Triage {
+        #[arg(long, default_value_t = 14)]
+        days: i64,
+    },
+    /// File a journal entry under an item (moves inbox entries into the item's project).
+    Attach { entry: String, item: String },
+    /// Open an item's file in $EDITOR.
+    Edit { id: String },
+    /// Rebuild the index from the vault.
+    Reindex,
+    /// Check the vault and index, and report stale or inconsistent items.
+    Doctor,
+    /// Install agent integrations: the Claude Code plugin, or an AGENTS.md section for Codex and others.
+    #[command(subcommand)]
+    Install(install::InstallCmd),
+    /// The project's About: what it is, goals, architecture, stack, how to build and run it, key terms.
+    About {
+        #[command(subcommand)]
+        cmd: Option<AboutCmd>,
+    },
+    /// Everything recorded about a topic, oldest first: decisions and what they replaced, rejected options,
+    /// experiments and their outcomes, ideas, resources, bugs and the findings behind them.
+    History {
+        #[arg(required = true, num_args = 1..)]
+        topic: Vec<String>,
+        /// Search every project, not just this one.
+        #[arg(long, short = 'A')]
+        all_projects: bool,
+    },
+    /// What happened when: work started and finished, decisions, experiment outcomes, blockers, findings,
+    /// handoffs, new plans, experiments and resources. Newest first, by day.
+    Timeline {
+        /// How far back, in days.
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+        /// Only events about this topic.
+        #[arg(long)]
+        topic: Option<String>,
+        #[arg(long, short = 'n', default_value_t = 200)]
+        limit: usize,
+    },
+    /// Are we going in circles? Flip-flopping decisions, reopened work, repeats of dead ends, spinning branches,
+    /// work that stays active without finishing.
+    #[command(alias = "loops")]
+    Insights,
+    /// Datasets, tables, models, endpoints, services … recorded for this project.
+    Resources {
+        /// Only this type (dataset, model, endpoint, service, …).
+        #[arg(long = "type")]
+        resource_type: Option<String>,
+        /// Include dropped ones.
+        #[arg(long, short)]
+        all: bool,
+    },
+    /// Terminal UI: projects, brief, item tree, decision log, journal, triage, search. Opens on this directory's
+    /// project.
+    Tui,
+    /// Web UI in your browser: overview, full plan tree, item pages with their whole story, questions you can
+    /// answer, decisions, experiments, resources, timeline. Local only (127.0.0.1, per-run token).
+    Web {
+        /// Open this item (e.g. QR-119) instead of the project overview.
+        id: Option<String>,
+        /// Port to listen on (default: any free port).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Print the link without opening a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// The vault's git history: commit now, show the path, or run git in it.
+    #[command(subcommand)]
+    Vault(VaultCmd),
+    /// Entry points for agent harness hooks (read the hook payload from stdin).
+    #[command(subcommand, hide = true)]
+    Hook(hook::HookCmd),
+}
+
+#[derive(Subcommand)]
+enum AboutCmd {
+    /// Add a fact to a section, as a bullet.
+    Add {
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        /// what, goals, non-goals, architecture, stack, run, data, terms, constraints, links.
+        #[arg(long, short, default_value = "what")]
+        section: String,
+    },
+    /// Replace a section (`-` reads stdin; empty text removes it).
+    Set {
+        section: String,
+        #[arg(num_args = 0..)]
+        text: Vec<String>,
+    },
+    /// Mark the About as reviewed (still accurate).
+    Confirm,
+    /// Open the project's About (project.md) in $EDITOR.
+    Edit,
+}
+
+#[derive(Subcommand)]
+enum VaultCmd {
+    /// Commit vault changes now (c5 also does this automatically after every write).
+    Commit {
+        /// Wait, commit quietly and log errors to git.log (used by c5 itself after writes).
+        #[arg(long, hide = true)]
+        background: bool,
+    },
+    /// Print the vault path.
+    Path,
+    /// Run git in the vault, e.g. `c5 vault git log --oneline -10`.
+    Git {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+/// After a status change: suggest an outcome when an item was closed without one, and say which items were
+/// waiting on it (they are ripe now). Hints go to stderr so `--json` output stays clean.
+fn after_close(app: &mut App, i: &Item, had_note: bool) -> Result<()> {
+    if !i.meta.status.is_closed() {
+        return Ok(());
+    }
+    if !had_note && !matches!(i.meta.kind, Kind::Decision | Kind::Note) {
+        eprintln!(
+            "c5: {} closed without an outcome; record what came out of it: `c5 log -i {} -k finding \"…\"`",
+            i.meta.id, i.meta.id
+        );
+    }
+    let waiting = app.store.items(&ItemFilter { project: Some(i.project.clone()), ..Default::default() })?;
+    let ripe: Vec<&Item> =
+        waiting.iter().filter(|w| w.meta.links.iter().any(|l| l.rel == "blocked-by" && l.to == i.meta.id)).collect();
+    for w in ripe {
+        eprintln!(
+            "c5: {} was waiting on {} and is ripe now: {} — tell the user if it matters to them",
+            w.meta.id, i.meta.id, w.meta.title
+        );
+    }
+    Ok(())
+}
+
+fn vault_cmd(env: &Env, cmd: VaultCmd) -> Result<()> {
+    match cmd {
+        VaultCmd::Commit { background: true } => {
+            std::thread::sleep(std::time::Duration::from_millis(env.git_delay_ms));
+            match c5_core::vcs::commit(env) {
+                Ok(Some(subject)) => c5_core::vcs::log_line(env, &format!("ok: {subject}")),
+                Ok(None) => {}
+                Err(e) => c5_core::vcs::log_line(env, &format!("error: {e}")),
+            }
+        }
+        VaultCmd::Commit { background: false } => match c5_core::vcs::commit(env)? {
+            Some(subject) => println!("committed: {subject}"),
+            None => println!("nothing to commit"),
+        },
+        VaultCmd::Path => println!("{}", env.vault.display()),
+        VaultCmd::Git { args } => {
+            let status = std::process::Command::new("git").arg("-C").arg(&env.vault).args(args).status()?;
+            if !status.success() {
+                bail!("git exited with {status}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Subcommand)]
+enum ProjectCmd {
+    /// Register this directory (its git work tree) as a new project.
+    Init {
+        /// Default: the directory name.
+        #[arg(long, short)]
+        name: Option<String>,
+        /// Short id prefix for items, e.g. BIL. Default: derived from the name.
+        #[arg(long, short)]
+        key: Option<String>,
+        #[arg(long, short)]
+        description: Option<String>,
+        /// Do not register the current directory as a root.
+        #[arg(long)]
+        no_root: bool,
+    },
+    /// Add this directory (and its git remote) to an existing project.
+    Link { key: String },
+    /// List projects.
+    Ls,
+    /// Show a project (default: the current one).
+    Show { key: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum SessionCmd {
+    /// Start (or resume, with the same --harness-id) a session in this directory.
+    Start {
+        #[arg(long)]
+        harness_id: Option<String>,
+        /// Also print the context brief.
+        #[arg(long)]
+        context: bool,
+        #[arg(long, default_value_t = 1500)]
+        budget: usize,
+    },
+    /// End the current session, optionally writing a handoff.
+    End {
+        #[arg(long)]
+        handoff: Option<String>,
+    },
+    /// List sessions.
+    Ls {
+        #[arg(long)]
+        open: bool,
+        #[arg(long, short = 'A')]
+        all_projects: bool,
+        #[arg(long, short = 'n', default_value_t = 20)]
+        limit: usize,
+    },
+}
+
+#[derive(Args)]
+struct DecisionArgs {
+    /// Why. Becomes the `## Why` section.
+    #[arg(long, short = 'w')]
+    because: Option<String>,
+    /// An alternative that was rejected, "option: why not" (repeatable).
+    #[arg(long, short = 'r')]
+    rejected: Vec<String>,
+    /// Topic, e.g. architecture, testing, storage (repeatable).
+    #[arg(long)]
+    area: Vec<String>,
+    /// Item this applies to; it then applies to everything under it (repeatable).
+    #[arg(long = "for", value_name = "ID")]
+    applies_to: Vec<String>,
+    /// More notes; `-` reads stdin.
+    #[arg(long, short)]
+    body: Option<String>,
+    #[arg(long)]
+    parent: Option<String>,
+    /// Record in the global log: applies to every project.
+    #[arg(long, short)]
+    global: bool,
+}
+
+impl DecisionArgs {
+    fn into_input(self, title: String, status: Status, supersedes: Vec<String>) -> Result<DecisionInput> {
+        Ok(DecisionInput {
+            title,
+            body: self.body.as_deref().map(text).transpose()?.unwrap_or_default(),
+            because: self.because.as_deref().map(text).transpose()?,
+            rejected: self.rejected,
+            areas: self.area,
+            applies_to: self.applies_to,
+            supersedes,
+            parent: self.parent,
+            status,
+            global: self.global,
+        })
+    }
+}
+
+/// Goal, due date, what it waits on, and the fields of experiments and resources (shared by `add`, `update` and
+/// `status`).
+#[derive(Args, Default)]
+struct ExtraArgs {
+    /// Why it exists: what it serves (one line). `""` clears.
+    #[arg(long, visible_alias = "why")]
+    goal: Option<String>,
+    /// When the user wants it done: 2026-12-01, today, tomorrow, mon…sun, 3d, 2w; `none` clears. Only set it when
+    /// the user gives a date.
+    #[arg(long, value_name = "WHEN")]
+    due: Option<String>,
+    /// It waits on this item (a `blocked-by` link); it shows as ripe once that closes (repeatable).
+    #[arg(long, value_name = "ID")]
+    after: Vec<String>,
+    /// Experiment: what is being tested.
+    #[arg(long)]
+    hypothesis: Option<String>,
+    /// Experiment: when a failed or inconclusive one is worth trying again (a condition).
+    #[arg(long, value_name = "CONDITION")]
+    retry_when: Option<String>,
+    /// Experiment: from when it is worth trying again: a date (2026-12-01) or a delay (30d, 6w); `none` clears.
+    #[arg(long, value_name = "DATE")]
+    retry_after: Option<String>,
+    /// Resource: dataset, table, pipeline, dashboard, notebook, model, endpoint, prompt, eval, index, feature,
+    /// service, api, database, queue, bucket, environment, repo, doc, other.
+    #[arg(long = "type", value_name = "TYPE")]
+    resource_type: Option<String>,
+    /// Resource: where it lives (table name, URI, path, URL). Never a credential.
+    #[arg(long = "at", value_name = "LOCATION")]
+    location: Option<String>,
+    /// Resource: who owns or maintains it.
+    #[arg(long)]
+    owner: Option<String>,
+}
+
+/// `2026-12-01`, `today`, `tomorrow`, `mon`…`sun`, or a delay from today: `30d`, `6w`, `3m`.
+fn parse_date(s: &str) -> Result<chrono::NaiveDate> {
+    c5_core::attention::parse_when(s, chrono::Local::now().date_naive()).map_err(|e| anyhow::anyhow!(e))
+}
+
+impl ExtraArgs {
+    fn retry_after(&self) -> Result<Option<Option<chrono::NaiveDate>>> {
+        match self.retry_after.as_deref() {
+            None => Ok(None),
+            Some(v) if v.eq_ignore_ascii_case("none") => Ok(Some(None)),
+            Some(v) => Ok(Some(Some(parse_date(v)?))),
+        }
+    }
+    fn due(&self) -> Result<Option<Option<chrono::NaiveDate>>> {
+        match self.due.as_deref() {
+            None => Ok(None),
+            Some(v) if v.eq_ignore_ascii_case("none") => Ok(Some(None)),
+            Some(v) => Ok(Some(Some(parse_date(v)?))),
+        }
+    }
+    fn after_links(&self) -> Result<Vec<Link>> {
+        self.after.iter().map(|a| Ok(format!("blocked-by:{a}").parse::<Link>()?)).collect()
+    }
+    fn patch(self, patch: ItemPatch) -> Result<ItemPatch> {
+        let retry_after = self.retry_after()?;
+        let due = self.due()?;
+        let mut add_links = patch.add_links.clone();
+        add_links.extend(self.after_links()?);
+        Ok(ItemPatch {
+            goal: self.goal,
+            due,
+            add_links,
+            hypothesis: self.hypothesis,
+            retry_when: self.retry_when,
+            retry_after,
+            resource_type: self.resource_type,
+            location: self.location,
+            owner: self.owner,
+            ..patch
+        })
+    }
+}
+
+#[derive(Args)]
+struct AddArgs {
+    kind: Kind,
+    #[arg(required = true, num_args = 1..)]
+    title: Vec<String>,
+    #[command(flatten)]
+    extra: ExtraArgs,
+    /// Topic, e.g. architecture, testing (repeatable). Decisions in the same area are shown when it is focused.
+    #[arg(long)]
+    area: Vec<String>,
+    #[arg(long)]
+    parent: Option<String>,
+    /// Description; `-` reads stdin.
+    #[arg(long, short)]
+    body: Option<String>,
+    #[arg(long, short)]
+    tag: Vec<String>,
+    /// 0 (highest) to 9.
+    #[arg(long, short = 'p', value_parser = clap::value_parser!(u8).range(0..=9))]
+    priority: Option<u8>,
+    #[arg(long, short)]
+    status: Option<Status>,
+    /// Typed link `rel:ID`, e.g. `regression-of:BIL-31`.
+    #[arg(long, short)]
+    link: Vec<Link>,
+    /// Also set it as the session focus.
+    #[arg(long, short)]
+    focus: bool,
+}
+
+#[derive(Args)]
+struct UpdateArgs {
+    id: String,
+    #[command(flatten)]
+    extra: ExtraArgs,
+    /// Add an area (repeatable).
+    #[arg(long)]
+    area: Vec<String>,
+    #[arg(long)]
+    title: Option<String>,
+    #[arg(long)]
+    status: Option<Status>,
+    /// New parent; `none` makes it top-level.
+    #[arg(long)]
+    parent: Option<String>,
+    /// 0-9, or `none`.
+    #[arg(long, short = 'p')]
+    priority: Option<String>,
+    #[arg(long, short)]
+    tag: Vec<String>,
+    #[arg(long)]
+    untag: Vec<String>,
+    #[arg(long, short)]
+    link: Vec<Link>,
+    /// Replace the body; `-` reads stdin.
+    #[arg(long, short)]
+    body: Option<String>,
+    /// Fail unless the item is at this rev.
+    #[arg(long)]
+    rev: Option<u32>,
+    #[arg(long, short)]
+    note: Option<String>,
+}
+
+#[derive(Args)]
+struct LsArgs {
+    #[arg(long, short)]
+    kind: Vec<Kind>,
+    #[arg(long, short)]
+    status: Vec<Status>,
+    /// Include done, dropped and superseded items.
+    #[arg(long, short)]
+    all: bool,
+    /// Show as a tree.
+    #[arg(long, short)]
+    tree: bool,
+    /// Only children of this item.
+    #[arg(long)]
+    parent: Option<String>,
+    #[arg(long, short = 'A')]
+    all_projects: bool,
+    #[arg(long, short = 'n')]
+    limit: Option<usize>,
+}
+
+/// `-` means stdin; anything else is the text itself.
+fn text(arg: &str) -> Result<String> {
+    if arg == "-" {
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).context("reading stdin")?;
+        Ok(s)
+    } else {
+        Ok(arg.to_string())
+    }
+}
+
+fn words(v: &[String]) -> Result<String> {
+    if v.len() == 1 { text(&v[0]) } else { Ok(v.join(" ")) }
+}
+
+fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce(&T)) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    } else {
+        human(value);
+    }
+    Ok(())
+}
+
+struct App {
+    store: Store,
+    caller: Caller,
+    json: bool,
+}
+
+impl App {
+    /// The project for a read command: explicit or resolved. Errors with guidance if neither.
+    fn project_key(&mut self) -> Result<String> {
+        let res = self.store.resolve(&self.caller)?;
+        match res.project {
+            Some(p) => {
+                self.store.sync_project(&p.meta.key)?;
+                Ok(p.meta.key)
+            }
+            None => bail!(
+                "this directory is not linked to a project; run `c5 context` for suggestions, or pass --project KEY / -A"
+            ),
+        }
+    }
+
+    fn scope(&mut self, all_projects: bool) -> Result<Option<String>> {
+        if all_projects {
+            self.store.sync_all()?;
+            Ok(None)
+        } else {
+            Ok(Some(self.project_key()?))
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
+    let cwd = match cli.cwd {
+        Some(c) => c,
+        None => std::env::current_dir().context("current directory")?,
+    };
+    // Agents run c5 without a terminal; a person typing at one is a human unless they say otherwise.
+    let agent = cli.agent.or_else(|| std::io::stdin().is_terminal().then(|| "human".to_string()));
+    let caller = Caller { cwd, agent, session: cli.session, project: cli.project };
+    let trace = std::env::var_os("C5_TRACE").is_some();
+    let t0 = std::time::Instant::now();
+    let env = Env::from_env()?;
+    if let Cmd::Vault(v) = cli.cmd {
+        return vault_cmd(&env, v);
+    }
+    if let Cmd::Tui = cli.cmd {
+        return c5_tui::run(Store::open(env)?, &caller);
+    }
+    if let Cmd::Web { id, port, no_open } = cli.cmd {
+        let mut store = Store::open(env)?;
+        let route = match id {
+            Some(i) => Some(format!("#/i/{}", normalize_item_id(&i)?)),
+            None => store.resolve(&caller)?.project.map(|p| format!("#/p/{}", p.meta.key)),
+        };
+        store.commit_on_drop = false;
+        let web = c5_web::Web::bind(port)?;
+        let url = web.url(route.as_deref());
+        println!("c5 web: {url}");
+        println!("(local only; the link carries this run's access token. Ctrl-C to stop.)");
+        if !no_open {
+            let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+            let _ = std::process::Command::new(opener)
+                .arg(&url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+        return web.serve(store);
+    }
+    let mut store = Store::open(env)?;
+    store.commit_on_drop = true;
+    if trace {
+        eprintln!("trace: open {:?}", t0.elapsed());
+    }
+    let mut app = App { store, caller, json: cli.json };
+    let json = app.json;
+
+    match cli.cmd {
+        Cmd::Context { budget } => {
+            let brief = context::build(&mut app.store, &app.caller)?;
+            emit(json, &brief, |b| print!("{}", context::render(b, budget)))?;
+        }
+        Cmd::Whereami => {
+            let res = app.store.resolve(&app.caller)?;
+            let session = app.store.current_session(&app.caller)?;
+            #[derive(Serialize)]
+            struct W<'a> {
+                resolution: &'a Resolution,
+                session: Option<Session>,
+                vault: String,
+                home: String,
+            }
+            let w = W {
+                resolution: &res,
+                session,
+                vault: app.store.env.vault.display().to_string(),
+                home: app.store.env.home.display().to_string(),
+            };
+            emit(json, &w, |w| print::whereami(w.resolution, w.session.as_ref(), &w.vault))?;
+        }
+        Cmd::Project(p) => project_cmd(&mut app, p)?,
+        Cmd::Session(s) => session_cmd(&mut app, s)?,
+        Cmd::Focus { id, clear, no_activate, goal } => {
+            if id.is_none() && !clear {
+                let s = app.store.current_session(&app.caller)?;
+                let focus = s.as_ref().and_then(|s| s.meta.focus.clone());
+                return emit(json, &focus, |f| match f {
+                    Some(f) => println!("{f}"),
+                    None => println!("no focus (set one with `c5 focus ID`)"),
+                });
+            }
+            let (session, mut item) = app.store.focus(&app.caller, id.as_deref(), !no_activate)?;
+            if let (Some(g), Some(i)) = (goal, &item)
+                && i.meta.goal.is_none()
+            {
+                item = Some(app.store.update_item(
+                    &app.caller,
+                    &i.meta.id,
+                    ItemPatch { goal: Some(g), ..Default::default() },
+                )?);
+            }
+            let decisions = match &item {
+                Some(i) => app.store.applicable_decisions(i, 5)?,
+                None => vec![],
+            };
+            #[derive(Serialize)]
+            struct F<'a> {
+                session: &'a Session,
+                item: &'a Option<Item>,
+                decisions: &'a [c5_core::decisions::Relevant],
+            }
+            emit(json, &F { session: &session, item: &item, decisions: &decisions }, |f| match f.item {
+                Some(i) => {
+                    println!(
+                        "focus {} [{}] {} (session {})",
+                        i.meta.id,
+                        i.meta.status,
+                        i.meta.title,
+                        f.session.short_id()
+                    );
+                    match &i.meta.goal {
+                        Some(g) => println!("goal: {g}"),
+                        None => println!(
+                            "goal: not recorded (`c5 focus {} --goal \"…\"` or `c5 update {} --goal \"…\"`)",
+                            i.meta.id, i.meta.id
+                        ),
+                    }
+                    if let Some(d) = i.meta.due {
+                        println!("due: {}", d.format("%a %b %-d"));
+                    }
+                    if !f.decisions.is_empty() {
+                        println!("\nfrom history (decisions, experiments, resources that apply):");
+                        print::relevant(f.decisions, "");
+                    }
+                }
+                None => println!("focus cleared (session {})", f.session.short_id()),
+            })?;
+        }
+        Cmd::Add(a) => {
+            let after = a.extra.after_links()?;
+            let ni = NewItem {
+                kind: Some(a.kind),
+                title: a.title.join(" "),
+                body: a.body.as_deref().map(text).transpose()?.unwrap_or_default(),
+                parent: a.parent,
+                priority: a.priority,
+                tags: a.tag,
+                areas: a.area,
+                goal: a.extra.goal.clone(),
+                due: a.extra.due()?.flatten(),
+                retry_after: a.extra.retry_after()?.flatten(),
+                hypothesis: a.extra.hypothesis,
+                retry_when: a.extra.retry_when,
+                resource_type: a.extra.resource_type,
+                location: a.extra.location,
+                owner: a.extra.owner,
+                links: {
+                    let mut l = a.link;
+                    l.extend(after);
+                    l
+                },
+                status: a.status,
+            };
+            let mut item = app.store.add_item(&app.caller, ni)?;
+            if a.focus {
+                let caller = Caller { project: Some(item.project.clone()), ..app.caller.clone() };
+                item = app.store.focus(&caller, Some(&item.meta.id), true)?.1.unwrap_or(item);
+            }
+            emit(json, &item, |i| {
+                println!("added {} {} [{}] {}", i.meta.id, i.meta.kind, i.meta.status, i.meta.title)
+            })?;
+        }
+        Cmd::Log { message, kind, item, refs } => {
+            let e = app.store.log(&app.caller, LogInput { kind, body: words(&message)?, item, refs })?;
+            emit(json, &e, print::logged)?;
+        }
+        Cmd::Status { id, status, note, extra } => {
+            let had_note = note.as_deref().is_some_and(|n| !n.trim().is_empty());
+            let patch = extra.patch(ItemPatch { status: Some(status), note, ..Default::default() })?;
+            let i = app.store.update_item(&app.caller, &id, patch)?;
+            emit(json, &i, |i| println!("{} is now {}", i.meta.id, i.meta.status))?;
+            after_close(&mut app, &i, had_note)?;
+        }
+        Cmd::Done { id, note } => {
+            let had_note = note.as_deref().is_some_and(|n| !n.trim().is_empty());
+            let i = app.store.update_item(
+                &app.caller,
+                &id,
+                ItemPatch { status: Some(Status::Done), note, ..Default::default() },
+            )?;
+            emit(json, &i, |i| println!("{} is now {}", i.meta.id, i.meta.status))?;
+            after_close(&mut app, &i, had_note)?;
+        }
+        Cmd::Pending { all_projects, limit } => {
+            let keys: Vec<String> = if all_projects {
+                app.store.sync_projects()?;
+                app.store.projects()?.into_iter().map(|p| p.meta.key).filter(|k| k != c5_core::GLOBAL).collect()
+            } else {
+                vec![app.project_key()?]
+            };
+            let mut rows = vec![];
+            for k in &keys {
+                let signals = app.store.insights(k)?.signals;
+                let mut r = app.store.attention(k, Some(&signals))?;
+                r.items.truncate(limit);
+                rows.push((k.clone(), r));
+            }
+            #[derive(Serialize)]
+            struct P<'a> {
+                project: &'a str,
+                #[serde(flatten)]
+                report: &'a c5_core::attention::AttentionReport,
+            }
+            let out: Vec<P> = rows.iter().map(|(k, r)| P { project: k, report: r }).collect();
+            if json && !all_projects {
+                emit(json, &out[0], |_| {})?;
+            } else {
+                emit(json, &out, |out| print::pending(out.iter().map(|p| (p.project, p.report)), all_projects))?;
+            }
+        }
+        Cmd::Ask { id, question } => {
+            let q = app.store.ask_agents(&app.caller, &id, &words(&question)?)?;
+            emit(json, &q, |q| {
+                println!("asked {} about {id}: the next agent session in this project will answer it", q.meta.id)
+            })?;
+        }
+        Cmd::Answer { id, answer, decide } => {
+            let (q, d) = app.store.answer(&app.caller, &id, &words(&answer)?, decide)?;
+            #[derive(Serialize)]
+            struct A<'a> {
+                item: &'a Item,
+                decision: &'a Option<String>,
+            }
+            emit(json, &A { item: &q, decision: &d }, |a| {
+                println!(
+                    "answered {}{}",
+                    a.item.meta.id,
+                    a.decision.as_ref().map(|d| format!("; recorded as {d}")).unwrap_or_default()
+                );
+                if let Some(about) = c5_core::ask::about_of(a.item) {
+                    println!("the answer is on {about} too; tell the user what you answered");
+                }
+            })?;
+        }
+        Cmd::Still { id, note } => {
+            let item = app.store.item(&id)?;
+            let e = app.store.log(
+                &app.caller,
+                LogInput { kind: EntryKind::Checkin, body: note, item: Some(item.meta.id.clone()), refs: vec![] },
+            )?;
+            emit(json, &e, |_| println!("{} checked in: still relevant", item.meta.id))?;
+        }
+        Cmd::Update(u) => {
+            let none_or = |s: &str| s.eq_ignore_ascii_case("none");
+            let patch = ItemPatch {
+                title: u.title,
+                status: u.status,
+                parent: u.parent.map(|p| if none_or(&p) { None } else { Some(p) }),
+                priority: u
+                    .priority
+                    .map(|p| {
+                        if none_or(&p) {
+                            Ok(None)
+                        } else {
+                            p.parse::<u8>().map(Some).context("priority must be 0-9 or none")
+                        }
+                    })
+                    .transpose()?,
+                add_tags: u.tag,
+                add_areas: u.area,
+                remove_tags: u.untag,
+                add_links: u.link,
+                body: u.body.as_deref().map(text).transpose()?,
+                expect_rev: u.rev,
+                note: u.note,
+                ..Default::default()
+            };
+            let patch = u.extra.patch(patch)?;
+            let i = app.store.update_item(&app.caller, &u.id, patch)?;
+            emit(json, &i, |i| println!("updated {} (rev {})", i.meta.id, i.meta.rev))?;
+        }
+        Cmd::Decide { title, d, supersedes, proposed } => {
+            let status = if proposed { Status::Proposed } else { Status::Accepted };
+            let d = app.store.decide(&app.caller, d.into_input(title.join(" "), status, supersedes)?)?;
+            emit(json, &d, |d| {
+                let verb = if d.meta.status == Status::Proposed { "proposed" } else { "decided" };
+                println!("{verb} {} {}", d.meta.id, d.meta.title);
+                for l in d.meta.links.iter().filter(|l| l.rel == "supersedes") {
+                    println!("  {} is now superseded", l.to);
+                }
+            })?;
+        }
+        Cmd::Reject { title, d } => {
+            let d = app.store.decide(&app.caller, d.into_input(title.join(" "), Status::Rejected, vec![])?)?;
+            emit(json, &d, |d| println!("rejected {} {}", d.meta.id, d.meta.title))?;
+        }
+        Cmd::Check { query, limit } => {
+            let project = app.store.resolve(&app.caller)?.project.map(|p| p.meta.key);
+            let found = app.store.check(&query.join(" "), project.as_deref(), limit)?;
+            emit(json, &found, |f| print::relevant(f, "nothing decided, rejected or parked about this yet"))?;
+        }
+        Cmd::Decisions { area, all, global, md } => {
+            let key = if global { app.store.ensure_global()?.meta.key } else { app.project_key()? };
+            let items = app.store.decision_log(&key, &area, all)?;
+            if md {
+                let project = app.store.project(&key)?;
+                print!("{}", c5_core::decisions::render_log_md(&project, &items));
+            } else {
+                emit(json, &items, |items| print::decision_log(items))?;
+            }
+        }
+        Cmd::Handoff { message } => {
+            let e = app.store.log(
+                &app.caller,
+                LogInput { kind: EntryKind::Handoff, body: words(&message)?, item: None, refs: vec![] },
+            )?;
+            emit(json, &e, print::logged)?;
+        }
+        Cmd::Ls(a) => {
+            let project = app.scope(a.all_projects)?;
+            let parent = a.parent.map(|p| normalize_item_id(&p)).transpose()?;
+            let f = ItemFilter {
+                project,
+                kinds: a.kind,
+                statuses: a.status,
+                include_closed: a.all,
+                parent: parent.map(Some),
+                limit: a.limit,
+            };
+            let items = app.store.items(&f)?;
+            emit(json, &items, |items| print::items(items, a.tree, a.all_projects))?;
+        }
+        Cmd::Show { id, entries } => {
+            let item = app.store.item(&id)?;
+            let children = app.store.items(&ItemFilter {
+                parent: Some(Some(item.meta.id.clone())),
+                include_closed: true,
+                ..Default::default()
+            })?;
+            let journal = app.store.entries(&EntryFilter {
+                item: Some(item.meta.id.clone()),
+                limit: Some(entries),
+                ..Default::default()
+            })?;
+            #[derive(Serialize)]
+            struct S {
+                item: Item,
+                children: Vec<Item>,
+                entries: Vec<Entry>,
+            }
+            emit(json, &S { item, children, entries: journal }, |s| print::show(&s.item, &s.children, &s.entries))?;
+        }
+        Cmd::Journal { item, of_session, kind, days, limit, all_projects } => {
+            let project = if item.is_some() { None } else { app.scope(all_projects)? };
+            let item = item.map(|i| app.store.item(&i).map(|i| i.meta.id)).transpose()?;
+            let session = match of_session {
+                Some(s) => Some(
+                    app.store
+                        .current_session(&Caller { session: Some(s), ..app.caller.clone() })?
+                        .map(|s| s.meta.id)
+                        .unwrap_or_default(),
+                ),
+                None => None,
+            };
+            let f = EntryFilter {
+                project,
+                item,
+                session,
+                kinds: kind,
+                since: days.map(|d| now() - chrono::Duration::days(d)),
+                limit: Some(limit),
+                ..Default::default()
+            };
+            let entries = app.store.entries(&f)?;
+            emit(json, &entries, |e| print::entries(e, all_projects))?;
+        }
+        Cmd::Search { query, all_projects, limit } => {
+            let project = app.scope(all_projects)?;
+            let hits = app.store.search(&query.join(" "), project.as_deref(), limit)?;
+            emit(json, &hits, |h| print::hits(h, all_projects))?;
+        }
+        Cmd::Triage { days } => {
+            let since = Some(now() - chrono::Duration::days(days));
+            let res = app.store.resolve(&app.caller)?;
+            let key = res.project.as_ref().map(|p| p.meta.key.clone());
+            if let Some(k) = &key {
+                app.store.sync_project(k)?;
+            }
+            app.store.sync_project(INBOX)?;
+            let unfiled = match &key {
+                Some(k) => app.store.entries(&EntryFilter {
+                    project: Some(k.clone()),
+                    unfiled: true,
+                    exclude_kinds: vec![EntryKind::Handoff],
+                    since,
+                    ..Default::default()
+                })?,
+                None => vec![],
+            };
+            let inbox = app.store.entries(&EntryFilter { project: Some(INBOX.into()), since, ..Default::default() })?;
+            #[derive(Serialize)]
+            struct T {
+                unfiled: Vec<Entry>,
+                inbox: Vec<Entry>,
+            }
+            emit(json, &T { unfiled, inbox }, |t| print::triage(&t.unfiled, &t.inbox))?;
+        }
+        Cmd::Attach { entry, item } => {
+            let e = app.store.attach(&entry, &item)?;
+            emit(json, &e, |e| {
+                println!("filed {} under {}", short_id(&e.meta.id), e.meta.item.as_deref().unwrap_or(""))
+            })?;
+        }
+        Cmd::Edit { id } => {
+            let item = app.store.item(&id)?;
+            let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{editor} \"$1\""))
+                .arg("sh")
+                .arg(&item.path)
+                .status()
+                .context("starting editor")?;
+            if !status.success() {
+                bail!("editor exited with {status}");
+            }
+            let item = app.store.item(&id)?;
+            emit(json, &item, |i| println!("{} saved (rev {})", i.meta.id, i.meta.rev))?;
+        }
+        Cmd::Reindex => {
+            let t = std::time::Instant::now();
+            let stats = app.store.reindex()?;
+            emit(json, &stats, |s| {
+                println!(
+                    "indexed {} projects, {} items, {} entries, {} sessions in {:?}",
+                    s.projects,
+                    s.items,
+                    s.entries,
+                    s.sessions,
+                    t.elapsed()
+                );
+                for w in &s.warnings {
+                    eprintln!("warning: {w}");
+                }
+            })?;
+        }
+        Cmd::Doctor => print::doctor(&mut app.store, json)?,
+        Cmd::Hook(h) => hook::run(&mut app.store, &app.caller, h)?,
+        Cmd::Install(i) => install::run(&app.store.env, i)?,
+        Cmd::About { cmd } => {
+            let key = app.project_key()?;
+            let about = match cmd {
+                None => app.store.about(&key)?,
+                Some(AboutCmd::Add { text, section }) => app.store.about_add(&key, &section, &words(&text)?)?,
+                Some(AboutCmd::Set { section, text }) => {
+                    let t = if text.is_empty() { String::new() } else { words(&text)? };
+                    app.store.about_set(&key, &section, &t)?
+                }
+                Some(AboutCmd::Confirm) => app.store.about_confirm(&key)?,
+                Some(AboutCmd::Edit) => {
+                    let path = app.store.about(&key)?.path;
+                    let editor =
+                        std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+                    let status = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(format!("{editor} \"$1\""))
+                        .arg("sh")
+                        .arg(&path)
+                        .status()
+                        .context("starting editor")?;
+                    if !status.success() {
+                        bail!("editor exited with {status}");
+                    }
+                    app.store.wrote.set(true);
+                    app.store.about_confirm(&key)?
+                }
+            };
+            emit(json, &about, print::about)?;
+        }
+        Cmd::History { topic, all_projects } => {
+            let project = app.scope(all_projects)?;
+            let events = app.store.history(&topic.join(" "), project.as_deref())?;
+            emit(json, &events, |e| print::history(e, all_projects))?;
+        }
+        Cmd::Timeline { days, topic, limit } => {
+            let key = app.project_key()?;
+            let mut events = app.store.timeline(&key, Some(now() - chrono::Duration::days(days)), topic.as_deref())?;
+            events.truncate(limit);
+            emit(json, &events, |e| print::timeline(e))?;
+        }
+        Cmd::Insights => {
+            let key = app.project_key()?;
+            let ins = app.store.insights(&key)?;
+            emit(json, &ins, |i| {
+                if i.signals.is_empty() {
+                    println!("no signs of going in circles");
+                }
+                for s in &i.signals {
+                    let level = ["", "·", "!", "!!"][s.severity.min(3) as usize];
+                    println!("{level:<2} {:<10} {}\n             {}", s.kind, s.title, s.detail);
+                }
+            })?;
+        }
+        Cmd::Resources { resource_type, all } => {
+            let key = app.project_key()?;
+            let mut items = app.store.items(&ItemFilter {
+                project: Some(key),
+                kinds: vec![Kind::Resource],
+                include_closed: all,
+                ..Default::default()
+            })?;
+            if let Some(t) = resource_type {
+                let t = slugify(&t);
+                items.retain(|i| i.meta.resource_type.as_deref() == Some(t.as_str()));
+            }
+            emit(json, &items, |i| print::resources(i))?;
+        }
+        Cmd::Vault(_) | Cmd::Tui | Cmd::Web { .. } => unreachable!("handled before the store is opened"),
+    }
+    if trace {
+        eprintln!("trace: total {:?}", t0.elapsed());
+    }
+    Ok(())
+}
+
+fn project_cmd(app: &mut App, cmd: ProjectCmd) -> Result<()> {
+    let json = app.json;
+    match cmd {
+        ProjectCmd::Init { name, key, description, no_root } => {
+            let cwd = app.caller.cwd.clone();
+            let name = match name {
+                Some(n) => n,
+                None => {
+                    let dir = c5_core::git::discover(&cwd).map(|g| g.root).unwrap_or(cwd.clone());
+                    dir.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .context("cannot derive a name; pass --name")?
+                }
+            };
+            let p = app.store.init_project(
+                &name,
+                key.as_deref(),
+                description.as_deref().unwrap_or(""),
+                (!no_root).then_some(cwd.as_path()),
+            )?;
+            let adopted = app.store.adopt_inbox(&p.meta.key)?;
+            emit(json, &p, |p| {
+                println!(
+                    "created project {} ({}) — items will be numbered {}-1, {}-2, …",
+                    p.meta.name, p.meta.key, p.meta.key, p.meta.key
+                );
+                print::project(p);
+                print::adopted(adopted);
+            })?;
+        }
+        ProjectCmd::Link { key } => {
+            let p = app.store.link_project(&key, &app.caller.cwd)?;
+            let adopted = app.store.adopt_inbox(&p.meta.key)?;
+            emit(json, &p, |p| {
+                println!("linked to {} ({})", p.meta.name, p.meta.key);
+                print::project(p);
+                print::adopted(adopted);
+            })?;
+        }
+        ProjectCmd::Ls => {
+            let ps = app.store.projects()?;
+            emit(json, &ps, |ps| {
+                if ps.is_empty() {
+                    println!("no projects yet; run `c5 project init` in a project directory");
+                }
+                for p in ps {
+                    let roots = p
+                        .meta
+                        .roots
+                        .iter()
+                        .map(|r| c5_core::env::display_path(std::path::Path::new(r)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("{:<8} {:<28} {}", p.meta.key, p.meta.name, roots);
+                }
+            })?;
+            if !json {
+                let unlinked = app.store.unlinked_folders()?;
+                if !unlinked.is_empty() {
+                    println!("\nNot set up yet (agents worked here without a project):");
+                    for u in &unlinked {
+                        println!(
+                            "  {}  ({} · {})\n    cd {} && {}",
+                            c5_core::env::display_path(std::path::Path::new(&u.cwd)),
+                            u.agent,
+                            c5_core::clock::date_time(&u.last_seen),
+                            c5_core::env::display_path(std::path::Path::new(&u.cwd)),
+                            c5_core::unlinked::init_command(&u.name, &u.key)
+                        );
+                    }
+                }
+            }
+        }
+        ProjectCmd::Show { key } => {
+            let p = match key {
+                Some(k) => app.store.project(&k)?,
+                None => {
+                    let k = app.project_key()?;
+                    app.store.project(&k)?
+                }
+            };
+            emit(json, &p, print::project)?;
+        }
+    }
+    Ok(())
+}
+
+fn session_cmd(app: &mut App, cmd: SessionCmd) -> Result<()> {
+    let json = app.json;
+    match cmd {
+        SessionCmd::Start { harness_id, context: with_context, budget } => {
+            let s = app.store.start_session(&app.caller, harness_id.as_deref())?;
+            if with_context {
+                let caller = Caller { session: Some(s.meta.id.clone()), ..app.caller.clone() };
+                let brief = context::build(&mut app.store, &caller)?;
+                return emit(json, &brief, |b| print!("{}", context::render(b, budget)));
+            }
+            emit(json, &s, |s| println!("session {} ({}) in {}", s.meta.id, s.meta.agent, s.meta.project))?;
+        }
+        SessionCmd::End { handoff } => {
+            let handoff = handoff.as_deref().map(text).transpose()?;
+            let s = app.store.end_session(&app.caller, handoff.as_deref())?;
+            emit(json, &s, |s| match s {
+                Some(s) => println!("ended session {}", s.short_id()),
+                None => println!("no open session here"),
+            })?;
+        }
+        SessionCmd::Ls { open, all_projects, limit } => {
+            let project = app.scope(all_projects)?;
+            let ss = app.store.sessions(project.as_deref(), open, limit)?;
+            emit(json, &ss, |ss| print::sessions(ss))?;
+        }
+    }
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    // Exit quietly when the reader goes away (`c5 journal | head`) instead of panicking on a broken pipe.
+    // SAFETY: restoring the default SIGPIPE disposition before any other threads exist.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+    let cli = Cli::parse();
+    let json = cli.json;
+    match run(cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            if json && !std::io::stderr().is_terminal() {
+                eprintln!("{}", serde_json::json!({ "error": format!("{e:#}") }));
+            } else {
+                eprintln!("c5: {e:#}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
